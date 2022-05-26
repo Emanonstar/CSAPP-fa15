@@ -307,16 +307,17 @@ int howManyBits(int x) {
  *   Rating: 4
  */
 unsigned floatScale2(unsigned uf) {
+  /* Decompose bit repretation into parts */
   unsigned exp = (uf << 1) >> 24;
   unsigned frac = (uf << 9) >> 9;
   unsigned s = (uf >> 31) << 31;
-  if (!(exp ^ 0)) {
+  if (exp == 0) {
     return s | (frac << 1);
   }
-  if (!(exp ^ 0xff)) {
+  if (exp == 0xff) {
     return uf;
   }
-  return s | ((exp + 1) << 23) | frac;;
+  return s | ((exp + 1) << 23) | frac;
 }
 /* 
  * floatFloat2Int - Return bit-level equivalent of expression (int) f
@@ -331,28 +332,33 @@ unsigned floatScale2(unsigned uf) {
  *   Rating: 4
  */
 int floatFloat2Int(unsigned uf) {
+  /* Decompose bit repretation into parts */
   unsigned exp = (uf << 1) >> 24;
   unsigned frac = (uf << 9) >> 9;
   unsigned s = (uf >> 31);
+  unsigned e, shift, m;
+  /* Too small. Return 0.0. */
   if (exp < 127) {
     return 0;
-  }
-  if (!(exp ^ 0xff)) {
-    return 0x80000000u;
-  }
-  frac = (1 << 23) | frac;
-  exp = exp - 127;
-  if (exp >= 23) {
-    exp = exp - 23;
-    if (exp >= 8) {
+  } 
+  m = (1 << 23) | frac;
+  e = exp - 127;
+  if (e >= 23) {
+    shift = e - 23;
+    /* Too big. Return 0x80000000u. */
+    if (shift >= 8) {
       return 0x80000000u;
-    }
-    frac = frac << exp;
-
-    return (frac << exp) | s;
+    } 
+    m = m << shift;
+  } else {
+    shift = 23 - e;
+    m = m >> shift;
   }
-  exp = 23 - exp;
-  return (frac >> exp) | s;;
+  if (s == 0) {
+    return m;
+  } else {
+    return ~m + 1;
+  }
 }
 /* 
  * floatPower2 - Return bit-level equivalent of the expression 2.0^x
@@ -382,7 +388,7 @@ unsigned floatPower2(int x) {
       exp = x + 127;
       frac = 0;
     } else {
-      /* Too small. Return +INF. */
+      /* Too big. Return +INF. */
       exp = 0xff;
       frac = 0;
     }
