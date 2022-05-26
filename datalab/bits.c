@@ -375,22 +375,22 @@ int floatFloat2Int(unsigned uf) {
  */
 unsigned floatPower2(int x) {
   unsigned exp, frac;
-    if (x < -149) {
-      /* Too small. Return 0.0. */
-      exp = 0;
-      frac = 0;
-    } else if (x < -126) {
-      /* Denormalized result */
-      exp = 0;
-      frac = 1 << (x + 149);
-    } else if (x < 128) {
-      /* Normalized result */
-      exp = x + 127;
-      frac = 0;
-    } else {
-      /* Too big. Return +INF. */
-      exp = 0xff;
-      frac = 0;
-    }
-    return (exp << 23) | frac;
+  if (x < -149) {
+    /* Too small. Return 0.0. */
+    exp = 0;
+    frac = 0;
+  } else if (x < -126) {
+    /* Denormalized result */
+    exp = 0;
+    frac = 1 << (x + 149);
+  } else if (x < 128) {
+    /* Normalized result */
+    exp = x + 127;
+    frac = 0;
+  } else {
+    /* Too big. Return +INF. */
+    exp = 0xff;
+    frac = 0;
+  }
+  return (exp << 23) | frac;
 }
