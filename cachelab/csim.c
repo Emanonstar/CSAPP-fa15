@@ -86,13 +86,13 @@ int main(int argc, char *argv[])
             tracefile = optarg;
             break;
         default:
-            fprintf(stderr, "Usage: [-v] -s <set_bits> -E <lines_per_set> <-b block_bits> <-t tracefile>\n");
+            fprintf(stderr, "Usage: [-v] -s <set_bits> -E <lines_per_set> -b <block_bits> -t <tracefile>\n");
             exit(EXIT_FAILURE);
         }
     }
 
     if (s == 0 || E == 0 || b == 0 || tracefile == NULL) {
-        printf("./csim: invalid input\nUsage: [-v] -s <set_bits> -E <lines_per_set> <-b block_bits> <-t tracefile>\n");
+        printf("./csim: invalid input\nUsage: [-v] -s <set_bits> -E <lines_per_set> -b <block_bits> -t <tracefile>\n");
         exit(EXIT_FAILURE);
     }
 
