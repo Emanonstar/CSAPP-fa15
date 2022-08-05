@@ -1,5 +1,5 @@
 /*
- * mm_segregated-list.c
+ * mm_explicit-free-list.c
  * 
  * In this approach, a block has a header and a footer.
  * The list of free blocks is a doublely-linked list, every free 
@@ -36,18 +36,20 @@ team_t team = {
     "winedia@gmail.com"
 };
 
+// #define DEBUG
+
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
+
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 #define WSIZE 4             /* Word and header/footer size (bytes) */
 #define DSIZE 8             /* Double word size (bytes) */
 #define CHUNKSIZE (1<<12)   /* Extend heap by this amoumt */
-#define BUCKETSIZE 16       /* Number of seglist buckets */
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -78,18 +80,17 @@ team_t team = {
 #define PRED_ADRP(bp) (bp)
 #define SUCC_ADRP(bp) ((char *)(bp) + DSIZE)
 
-// #define DEBUG
 #ifdef DEBUG
 #define CHECKHEAP int ret; if ((ret = mm_check()) != 0) printf("%s %d: error %d\n", __func__, __LINE__, ret), exit(1)
 #else
 #define CHECKHEAP 0
 #endif
 
-/* Given index, compute address of corresponding root */
-#define ROOT(index) ((char *)(heap_listp) + ((index) * DSIZE))
-
 /* Ptr points to the prologue block */
 static char *heap_listp;
+
+/*Ptr points to the root of explicit free list */
+static char **root;
 
 /*Prototypes of helper functions */
 static void *extend_heap(size_t words);
@@ -98,9 +99,8 @@ static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static void delete_block(void *bp);
 static void insert_block_at_beginning(void *bp);
-inline size_t adjust(size_t size);
-static int index_of(size_t asize);
 static int list_contains(void *bp);
+inline size_t adjust(size_t size);
 
 /* 
  * mm_init - initialize the malloc package.
@@ -108,16 +108,15 @@ static int list_contains(void *bp);
 int mm_init(void)
 {
     /* Create the initial empty heap */
-    if ((heap_listp = mem_sbrk((BUCKETSIZE+2) * DSIZE)) == (void *)-1)
+    if ((heap_listp = mem_sbrk(6 * WSIZE)) == (void *)-1)
         return -1;
-    PUT(heap_listp, 0);                                                     /* Allignment padding */
-    PUT(heap_listp +(1*WSIZE), PACK((BUCKETSIZE+1)*DSIZE, 1));              /* Prologue header */
-    PUT(heap_listp +((BUCKETSIZE+1)*DSIZE), PACK((BUCKETSIZE+1)*DSIZE, 1)); /* Prologue footer */
-    PUT(heap_listp +((BUCKETSIZE+1)*DSIZE+WSIZE), PACK(0, 1));              /* Epilogue header */
+    PUT(heap_listp, 0);                             /* Allignment padding */
+    PUT(heap_listp +(1*WSIZE), PACK(2*DSIZE, 1));   /* Prologue header */
+    PUT(heap_listp +(4*WSIZE), PACK(2*DSIZE, 1));   /* Prologue footer */
+    PUT(heap_listp +(5*WSIZE), PACK(0, 1));         /* Epilogue header */
     heap_listp += DSIZE;
-    for (unsigned int i = 0; i < BUCKETSIZE; i++) {
-        PUT_D(ROOT(i), NULL);
-    }
+    root = (char **)(heap_listp);
+    *root = NULL;
     
     /* Extend the empty heap with a free block of CHUNKSIZE words */
     if (extend_heap(CHUNKSIZE) == NULL)
@@ -125,35 +124,19 @@ int mm_init(void)
     return 0;
 }
 
-static int index_of(size_t asize) 
-{
-    int a[BUCKETSIZE-1]={3,4,5,6,7,8,16,32,64,128,256,512,1024,2048,4096};
-    int i;
-    for (i = 0; i < BUCKETSIZE-1; i++) {
-        if (asize <= a[i]*DSIZE) {
-            return i;
-        }
-    }
-    return BUCKETSIZE-1;
-}
-
 /* 
  * mm_check - scan the heap and check it for consistency.
  */
 static int mm_check(void)
 {
-    void **root;
     void *p;
     void *lastp;
 
     /* Check free list contains no allocated blocks */ 
-    for (int i = 0; i < BUCKETSIZE; i++) {
-        root = ROOT(i);
-        for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
-        {
-            if (GET_ALLOC(HDRP(p)))
-                return 1;
-        }
+    for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
+    {
+        if (GET_ALLOC(HDRP(p)))
+            return 1;
     }
 
     /* Check all free blocks are in the free list */ 
@@ -173,24 +156,19 @@ static int mm_check(void)
     }
 
     /* Check pred/succ pointers in free	blocks are consistent */ 
-    for (int i = 0; i < BUCKETSIZE; i++) {
-        root = ROOT(i);
-        lastp = NULL;
-        for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
-        {
-            if (GET_D(PRED_ADRP(p)) != lastp)
-                return 4;
-            lastp = p;
-        }
+    lastp = NULL;
+    for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
+    {
+        if (GET_D(PRED_ADRP(p)) != lastp)
+            return 4;
+        lastp = p;
     }
-    
     return 0;
 }
 
 /* Check if the free list contains the block(bp) */ 
 static int list_contains(void *bp)
 {
-    void **root = ROOT(index_of(GET_SIZE(HDRP(bp))));
     void *p;
     for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
     {
@@ -270,9 +248,9 @@ static void delete_block(void *bp)
     if (pred != NULL) {
         PUT_D(SUCC_ADRP(pred), succ);
     } else {
-        PUT_D(ROOT(index_of(GET_SIZE(HDRP(bp)))), succ);
+        PUT_D(root, succ);
     }
-    if (succ != NULL) {
+    if (succ != NULL){
         PUT_D(PRED_ADRP(succ), pred);
     }
 }
@@ -280,10 +258,9 @@ static void delete_block(void *bp)
 /* Insert the block(bp) at the beginning of the free list. */
 static void insert_block_at_beginning(void *bp)
 {
-    void *root = ROOT(index_of(GET_SIZE(HDRP(bp))));
     void *old_beginning = GET_D(root);
     PUT_D(SUCC_ADRP(bp), old_beginning);
-    PUT_D(PRED_ADRP(bp), NULL);
+    PUT_D(bp, NULL);
     if (old_beginning != NULL) 
         PUT_D(PRED_ADRP(old_beginning), bp);
     PUT_D(root, bp);
@@ -318,6 +295,7 @@ void *mm_malloc(size_t size)
     if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
     place(bp, asize);
+
     return bp;
 }
 
@@ -336,13 +314,11 @@ inline size_t adjust(size_t size)
 static void *find_fit(size_t asize)
 {
     void *p;
-    for (int i = index_of(asize); i < BUCKETSIZE; i++) {
-        for (p = GET_D(ROOT(i)); p != NULL; p = GET_D(SUCC_ADRP(p)))
-        {
-            if (GET_SIZE(HDRP(p)) >= asize)
-                return p;
-        }
-    }  
+    for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
+    {
+        if (GET_SIZE(HDRP(p)) >= asize)
+            return p;
+    }
     return NULL;    /* No fit */
 }
 
@@ -351,8 +327,10 @@ static void place(void *bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp));
     size_t left = csize - asize;
+    // void *pred = GET_D(PRED_ADRP(bp));
+    // void *succ = GET_D(SUCC_ADRP(bp));
 
-    if (left >= (3*DSIZE)) {
+    if (left >= (3 *DSIZE)) {
         delete_block(bp);
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
@@ -361,6 +339,15 @@ static void place(void *bp, size_t asize)
         PUT(HDRP(bp), PACK(left, 0));
         PUT(FTRP(bp), PACK(left, 0));
         insert_block_at_beginning(bp);
+        // if (pred != NULL) {
+        //     PUT_D(SUCC_ADRP(pred), bp);
+        // } else {
+        //     PUT_D(root, bp);
+        // }
+        // PUT_D(PRED_ADRP(bp), pred);
+        // PUT_D(SUCC_ADRP(bp), succ);
+        // if (succ != NULL)
+        //     PUT_D(PRED_ADRP(succ), bp);
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
@@ -376,10 +363,8 @@ static void place(void *bp, size_t asize)
 void mm_free(void *ptr)
 {
     size_t size = GET_SIZE(HDRP(ptr));
-
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-
     coalesce(ptr);
 }
 
