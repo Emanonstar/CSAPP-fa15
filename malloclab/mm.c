@@ -2,6 +2,9 @@
  * mm_explicit-free-list.c
  * 
  * In this approach, a block has a header and a footer.
+ * The list of free blocks is a doublely-linked list, every free 
+ * block has a PRED(predecessor) ptr and a SUCC(successor) ptr.
+ * A LIFO ordering and a first-fit placement policy are adopted.
  * Blocks are splitted and  coalesced immediately. 
  * Realloc is implemented directly using mm_malloc and mm_free.
  *
@@ -22,15 +25,15 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "solo",
+    "YXYX",
     /* First member's full name */
     "Li Yuxing",
     /* First member's email address */
     "yuxingli@pku.edu.cn",
     /* Second member's full name (leave blank if none) */
-    "",
+    "Wu Yingxi",
     /* Second member's email address (leave blank if none) */
-    ""
+    "winedia@gmail.com"
 };
 
 /* single word (4) or double word (8) alignment */
@@ -71,8 +74,9 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-/* Given a free block ptr bp, get ptr points to address of succ block */
-#define SUCCP(bp) ((char *)(bp) + DSIZE)
+/* Given a free block ptr bp, get ptr points to address of pred and succ blocks */
+#define PRED_ADRP(bp) (bp)
+#define SUCC_ADRP(bp) ((char *)(bp) + DSIZE)
 
 /* Ptr points to the prologue block */
 static char *heap_listp;
@@ -84,6 +88,9 @@ static void *extend_heap(size_t words);
 static void *coalesce(void *ptr);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+static void delete_block(void *bp);
+static void insert_block_at_begaining(void *bp);
+inline size_t adjust(size_t size);
 
 /* 
  * mm_init - initialize the malloc package.
@@ -91,13 +98,12 @@ static void place(void *bp, size_t asize);
 int mm_init(void)
 {
     /* Create the initial empty heap */
-    if ((heap_listp = mem_sbrk(8 * WSIZE)) == (void *)-1)
+    if ((heap_listp = mem_sbrk(6 * WSIZE)) == (void *)-1)
         return -1;
     PUT(heap_listp, 0);                         /* Allignment padding */
-    PUT(heap_listp +(1*WSIZE), PACK(4 * DSIZE, 1)); /* Prologue header */
-    PUT(heap_listp +(6*WSIZE), PACK(4 * DSIZE, 1)); /* Prologue footer */
-    PUT(heap_listp +(7*WSIZE), PACK(0, 1));     /* Epilogue header */
-    heap_listp += DSIZE;
+    PUT(heap_listp +(1*WSIZE), PACK(3 * DSIZE, 1)); /* Prologue header */
+    PUT(heap_listp +(4*WSIZE), PACK(3 * DSIZE, 1)); /* Prologue footer */
+    PUT(heap_listp +(5*WSIZE), PACK(0, 1));     /* Epilogue header */
     root = (char **)(heap_listp + DSIZE);
     *(unsigned long *)(heap_listp) = 0;
     *root = NULL;
@@ -124,9 +130,6 @@ static void *extend_heap(size_t words)
     PUT(FTRP(bp), PACK(size, 0));           /* Free block footer */
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));   /* New epilogue header */
 
-    // PUT_D(SUCCP(bp), *((unsigned long *) root));
-    // PUT_D(root, bp);
-
     /* Coalesce if the previous block was free */
     return coalesce(bp);
 }
@@ -136,48 +139,21 @@ static void *coalesce(void *ptr)
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
     size_t size = GET_SIZE(HDRP(ptr));
-    void *pred;
-    void *succ;
     // printf("Coalescing %p size %x prev_alloc: %u next_alloc: %u\n", ptr, size, prev_alloc, next_alloc);
 
     if (prev_alloc && next_alloc) {                 /* Case 1 */
-        // PUT_D(SUCCP(ptr), *((unsigned long *) root));
-        // PUT_D(ptr, NULL);
-        // PUT_D(root, ptr);
-        // return ptr;
+        /* do nothing */
     }
 
     else if (prev_alloc && !next_alloc) {           /* Case 2 */
-        pred = GET_D(NEXT_BLKP(ptr));
-        succ = GET_D(SUCCP(NEXT_BLKP(ptr)));
-        // printf("  %p size: %x pred: %p, succ: %p\n", NEXT_BLKP(ptr), GET_SIZE(HDRP(NEXT_BLKP(ptr))), pred, succ);
-        if (pred != NULL) {
-            PUT_D(SUCCP(pred), succ);
-        } else {
-            PUT_D(root, succ);
-        }
-        if (succ != NULL){
-            PUT_D(succ, pred);
-        }
-
+        delete_block(NEXT_BLKP(ptr));
         size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
         PUT(HDRP(ptr), PACK(size, 0));
         PUT(FTRP(ptr), PACK(size, 0));
     }
 
     else if (!prev_alloc && next_alloc) {           /* Case 3 */
-        pred = GET_D(PREV_BLKP(ptr));
-        succ = GET_D(SUCCP(PREV_BLKP(ptr)));
-        // printf("  %p pred: %p, succ: %p\n", PREV_BLKP(ptr), pred, succ);
-        if (pred != NULL) {
-            PUT_D(SUCCP(pred), succ);
-        } else {
-            PUT_D(root, succ);
-        }
-        if (succ != NULL){
-            PUT_D(succ, pred);
-        }
-
+        delete_block(PREV_BLKP(ptr));
         size += GET_SIZE(HDRP(PREV_BLKP(ptr)));
         PUT(FTRP(ptr), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
@@ -185,30 +161,8 @@ static void *coalesce(void *ptr)
     }
 
     else {                                          /* Case 4 */
-        pred = GET_D(NEXT_BLKP(ptr));
-        succ = GET_D(SUCCP(NEXT_BLKP(ptr)));
-        // printf("  %p pred: %p, succ: %p\n", NEXT_BLKP(ptr), pred, succ);
-        if (pred != NULL) {
-            PUT_D(SUCCP(pred), succ);
-        } else {
-            PUT_D(root, succ);
-        }
-        if (succ != NULL){
-            PUT_D(succ, pred);
-        }
-        
-        pred = GET_D(PREV_BLKP(ptr));
-        succ = GET_D(SUCCP(PREV_BLKP(ptr)));
-        // printf("  %p pred: %p, succ: %p\n", PREV_BLKP(ptr), pred, succ);
-        if (pred != NULL) {
-            PUT_D(SUCCP(pred), succ);
-        } else {
-            PUT_D(root, succ);
-        }
-        if (succ != NULL){
-            PUT_D(succ, pred);
-        }
-
+        delete_block(NEXT_BLKP(ptr));
+        delete_block(PREV_BLKP(ptr));
         size += GET_SIZE(HDRP(NEXT_BLKP(ptr))) +
             GET_SIZE(HDRP(PREV_BLKP(ptr)));
         PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
@@ -216,13 +170,40 @@ static void *coalesce(void *ptr)
         ptr = PREV_BLKP(ptr);
     }
 
-    PUT_D(SUCCP(ptr), *((unsigned long *) root));
-    PUT_D(ptr, NULL);
-    if (*root != NULL) 
-        PUT_D(*root, ptr);
-    PUT_D(root, ptr);
+    insert_block_at_begaining(ptr);
     // printf("After coalescing, ptr: %p, size: %x\n\n", ptr, GET_SIZE(HDRP(ptr)));
     return ptr;
+}
+
+/* 
+ * delete_block - Delete the block pointed by bp from the free list.
+ */
+static void delete_block(void *bp)
+{
+    void *pred = GET_D(PRED_ADRP(bp));
+    void *succ = GET_D(SUCC_ADRP(bp));
+    if (pred != NULL) {
+        PUT_D(SUCC_ADRP(pred), succ);
+    } else {
+        PUT_D(root, succ);
+    }
+    if (succ != NULL){
+        PUT_D(PRED_ADRP(succ), pred);
+    }
+}
+
+/* 
+ * insert_block_at_begaining 
+ * - Insert the block pointed by bp at the begaining of the free list.
+ */
+static void insert_block_at_begaining(void *bp)
+{
+    void *old_begaining = (void *)*((unsigned long *) root);
+    PUT_D(SUCC_ADRP(bp), old_begaining);
+    PUT_D(bp, NULL);
+    if (old_begaining != NULL) 
+        PUT_D(PRED_ADRP(old_begaining), bp);
+    PUT_D(root, bp);
 }
 
 /* 
@@ -239,11 +220,8 @@ void *mm_malloc(size_t size)
     if (size == 0)
         return NULL;
 
-    /* Adjust block size to include overhead and alignment reqs. */
-    if (size < 2 * DSIZE)
-        asize = 3 * DSIZE;
-    else 
-        asize = ALIGN((size + DSIZE));
+    // /* Adjust block size to include overhead and alignment reqs. */
+    asize = adjust(size);
     
     /* Search the free list for a fit */
     if ((bp = find_fit(asize)) != NULL) {
@@ -262,14 +240,28 @@ void *mm_malloc(size_t size)
     return bp;
 }
 
+/* Adjust block size to include overhead and alignment reqs. */
+inline size_t adjust(size_t size)
+{
+    size_t asize;
+    if (size < 2 * DSIZE)
+        asize = 3 * DSIZE;
+    else 
+        asize = ALIGN((size + DSIZE));
+    return asize;
+}
+
 /* First-fit search */
 static void *find_fit(size_t asize)
 {
     void *p;
-    for (p = *root; p != NULL; p = GET_D(SUCCP(p)))
+    for (p = *root; p != NULL; p = GET_D(SUCC_ADRP(p)))
     {
         // printf("p: %p, PRED: %p, SUCC: %p, HDR: %d\n", p, GET_D(p), GET_D(SUCCP(p)), GET_SIZE(HDRP(p)));
-        if (!GET_ALLOC(HDRP(p)) && (GET_SIZE(HDRP(p)) >= asize)) {
+        // if (!GET_ALLOC(HDRP(p)) && (GET_SIZE(HDRP(p)) >= asize)) {
+        //     return p;
+        // }
+        if (GET_SIZE(HDRP(p)) >= asize) {
             return p;
         }
     }
@@ -280,8 +272,8 @@ static void place(void *bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp));
     size_t left = csize - asize;
-    void *pred = GET_D(bp);
-    void *succ = GET_D(SUCCP(bp));
+    void *pred = GET_D(PRED_ADRP(bp));
+    void *succ = GET_D(SUCC_ADRP(bp));
 
     if (left >= (3 *DSIZE)) {
         PUT(HDRP(bp), PACK(asize, 1));
@@ -290,24 +282,18 @@ static void place(void *bp, size_t asize)
         PUT(HDRP(bp), PACK(left, 0));
         PUT(FTRP(bp), PACK(left, 0));
         if (pred != NULL) {
-            PUT_D(SUCCP(pred), bp);
+            PUT_D(SUCC_ADRP(pred), bp);
         } else {
             PUT_D(root, bp);
         }
-        PUT_D(bp, pred);
-        PUT_D(SUCCP(bp), succ);
+        PUT_D(PRED_ADRP(bp), pred);
+        PUT_D(SUCC_ADRP(bp), succ);
         if (succ != NULL)
-            PUT_D(succ, bp);
+            PUT_D(PRED_ADRP(succ), bp);
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
-        if (pred != NULL) {
-            PUT_D(SUCCP(pred), succ);
-        } else {
-            PUT_D(root, succ);
-        }  
-        if (succ != NULL)
-            PUT_D(succ, pred);
+        delete_block(bp);
     }
 }
 
@@ -321,8 +307,7 @@ void mm_free(void *ptr)
 
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    // PUT_D(SUCCP(ptr), *((unsigned long *) root));
-    // PUT_D(root, ptr);
+
     coalesce(ptr);
 }
 
@@ -334,6 +319,9 @@ void *mm_realloc(void *ptr, size_t size)
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
+
+    // if (GET_SIZE(HDRP(oldptr)) == adjust(size))
+    //     return oldptr;
     
     newptr = mm_malloc(size);
     if (newptr == NULL)
