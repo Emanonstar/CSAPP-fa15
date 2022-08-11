@@ -50,7 +50,7 @@ team_t team = {
 #define DSIZE 8                 /* Double word size (bytes) */
 #define CHUNKSIZE (1<<12)       /* Extend heap by this amoumt */
 #define INITCHUNKSIZE (1<<6)    /* Initialize heap by this amount */
-#define BUCKETSIZE 16           /* Number of seglist buckets */
+#define BUCKETSIZE 18           /* Number of seglist buckets */
 #define THRESHOLD 80            /* Paarameter used by place()*/
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -136,7 +136,7 @@ int mm_init(void)
 
 static int index_of(size_t asize) 
 {
-    int a[BUCKETSIZE-1]={3,4,5,6,7,8,16,32,64,128,256,512,1024,2048,4096};
+    int a[BUCKETSIZE-1]={3,4,5,6,7,8,15,16,17,32,64,128,256,512,1024,2048,4096};
     int i;
     for (i = 0; i < BUCKETSIZE-1; i++) {
         if (asize <= a[i]*DSIZE) {
@@ -236,6 +236,46 @@ static void insert_block_at_beginning(void *bp)
     CHECKHEAP;
 }
 
+// static void insert_block(void *bp)
+// {
+//     size_t size = GET_SIZE(HDRP(bp));
+//     void *root = ROOT(index_of(size));
+//     void *first_bp = GET_D(root);
+//     void *p;
+
+//     if (first_bp == NULL) {
+//         PUT_D(PRED_ADRP(bp), NULL);
+//         PUT_D(SUCC_ADRP(bp), NULL); 
+//         PUT_D(root, bp);
+//         CHECKHEAP;
+//         return;
+//     }
+
+//     for (p = first_bp; p != NULL; p = GET_D(SUCC_ADRP(p)))
+//     {
+//         if (size < GET_SIZE(HDRP(p))) {
+//             PUT_D(SUCC_ADRP(bp), p);
+//             PUT_D(PRED_ADRP(bp), GET_D(PRED_ADRP(p)));
+//             if (GET_D(PRED_ADRP(p)) != NULL) {
+//                 PUT_D(SUCC_ADRP(GET_D(PRED_ADRP(p))), bp);
+//             } else {
+//                 PUT_D(root, bp);
+//             }
+//             PUT_D(PRED_ADRP(p), bp);
+//             CHECKHEAP;
+//             return;
+//         }
+
+//         if (GET_D(SUCC_ADRP(p)) == NULL) {
+//             PUT_D(SUCC_ADRP(bp), NULL);
+//             PUT_D(PRED_ADRP(bp), p);
+//             PUT_D(SUCC_ADRP(p), bp);
+//             CHECKHEAP;
+//             return;
+//         }
+//     }
+// }
+
 static void insert_block(void *bp)
 {
     size_t size = GET_SIZE(HDRP(bp));
@@ -253,7 +293,7 @@ static void insert_block(void *bp)
 
     for (p = first_bp; p != NULL; p = GET_D(SUCC_ADRP(p)))
     {
-        if (size < GET_SIZE(HDRP(p))) {
+        if (bp < p) {
             PUT_D(SUCC_ADRP(bp), p);
             PUT_D(PRED_ADRP(bp), GET_D(PRED_ADRP(p)));
             if (GET_D(PRED_ADRP(p)) != NULL) {
