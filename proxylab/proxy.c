@@ -12,15 +12,16 @@ static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64;
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *buf);
 void parse_url(char *url, char *host, char *port, char *uri);
-void clienterror(int fd, char *cause, char *errnum, 
-		 char *shortmsg, char *longmsg);
+void clienterror(int fd, char *cause, char *shortmsg, char *longmsg);
+void *thread(void *vargp);
 
 int main(int argc, char **argv)
 {
-    int listenfd, connfd;
+    int listenfd, *connfdp;
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
+    pthread_t tid;
 
     /* Check command line args */
     if (argc != 2) {
@@ -31,14 +32,29 @@ int main(int argc, char **argv)
     listenfd = Open_listenfd(argv[1]);
     while (1) {
         clientlen = sizeof(clientaddr);
-        connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:proxy:accept
+        connfdp = Malloc(sizeof(int));
+        *connfdp =  Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:proxy:accept
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
                     port, MAXLINE, 0);
         printf("Accepted connection from (%s, %s)\n", hostname, port);
-        doit(connfd);                                             //line:netp:proxy:doit
-        Close(connfd);                                            //line:netp:proxy:close
+        Pthread_create(&tid, NULL, thread, connfdp);
     }
 }
+
+/*
+ * thread routine
+ */
+/* $begin thread routine */
+void *thread(void *vargp) {
+    int connfd = *((int *)vargp);
+    printf("thread: %d\n", connfd);
+    Pthread_detach(pthread_self());
+    Free(vargp);
+    doit(connfd);
+    Close(connfd);
+    return NULL;
+}
+/* $end thread routine */
 
 /*
  * doit - handle one HTTP request/response transaction
@@ -46,21 +62,27 @@ int main(int argc, char **argv)
 /* $begin doit */
 void doit(int fd) 
 {
-    int is_static;
     int clientfd;
-    struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], url[MAXLINE], version[MAXLINE];
     char uri[MAXLINE], host[MAXLINE], port[MAXLINE];
     rio_t rio, rio_s;
 
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
-    if (!Rio_readlineb(&rio, buf, MAXLINE))  //line:netp:doit:readrequest
+    if (!Rio_readlineb(&rio, buf, MAXLINE))             //line:netp:doit:readrequest
         return;
+    
     printf("%s", buf);
-    sscanf(buf, "%s %s %s", method, url, version);       //line:netp:doit:parserequest
+    sscanf(buf, "%s %s %s", method, url, version);      //line:netp:doit:parserequest
+  
     strcpy(version, "HTTP/1.0");
     parse_url(url, host, port, uri);
+
+    if ((clientfd = open_clientfd(host, port)) < 0) {
+        clienterror(fd, url, "Not found",
+		    "Proxy couldn't connect this web");
+        return;
+    }
 
     sprintf(buf, "%s %s %s\r\n", method, uri, version);
     sprintf(buf, "%s%s", buf, user_agent_hdr);
@@ -68,12 +90,13 @@ void doit(int fd)
     sprintf(buf, "%sConnection: close\r\n", buf);
     sprintf(buf, "%sProxy-Connection: close\r\n", buf);
 
-    read_requesthdrs(&rio, buf);                              //line:netp:doit:readrequesthdrs
-    
-    clientfd = Open_clientfd(host, port);
-    Rio_readinitb(&rio_s, clientfd);
-    Rio_writen(clientfd, buf, strlen(buf));
+    read_requesthdrs(&rio, buf);                   //line:netp:doit:readrequesthdrs
 
+    /* Send request line and headers to server */
+    Rio_writen(clientfd, buf, strlen(buf));        
+
+    /* Read servers’ response, and forward to client */
+    Rio_readinitb(&rio_s, clientfd);
     while(Rio_readnb(&rio_s, buf, MAXLINE)) {
         Rio_writen(fd, buf, MAXLINE);
     }
@@ -89,13 +112,18 @@ void parse_url(char *url, char *host, char *port, char *uri)
 {
     char *ptr;                         
 
-    ptr = strchr(url, '/'); 
-    strcpy(host, ptr + 2); 
-
-    ptr = strchr(host, '/');
-    strcpy(uri, ptr);
-    *ptr = '\0';
-
+    ptr = strstr(url, "http://"); 
+    if (ptr) {
+        strcpy(host, ptr + 7); 
+    } else {
+        strcpy(host, url);
+    }
+    
+    if ((ptr = strchr(host, '/'))) {
+        strcpy(uri, ptr);
+        *ptr = '\0';
+    } 
+     
     if ((ptr = strchr(host, ':'))) {
         strcpy(port, ptr + 1);
         *ptr = '\0';
@@ -123,3 +151,31 @@ void read_requesthdrs(rio_t *rp, char *hdr)
     return;
 }
 /* $end read_requesthdrs */
+
+/*
+ * clienterror - returns an error message to the client
+ */
+/* $begin clienterror */
+void clienterror(int fd, char *cause, char *shortmsg, char *longmsg) 
+{
+    char buf[MAXLINE];
+
+    /* Print the HTTP response headers */
+    sprintf(buf, "HTTP/1.0 %s\r\n", shortmsg);
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Content-type: text/html\r\n\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+
+    /* Print the HTTP response body */
+    sprintf(buf, "<html><title>Proxy Error</title>");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "<body bgcolor=""ffffff"">\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "%s\r\n", shortmsg);
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "<p>%s: %s\r\n", longmsg, cause);
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "<hr><em>The Proxy Web server</em>\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+}
+/* $end clienterror */
