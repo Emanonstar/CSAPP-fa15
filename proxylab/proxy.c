@@ -5,15 +5,35 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
+/* Node of dequeue, used to cache web objects */
+typedef struct block {
+    char url[MAXLINE];
+    size_t payload_size;
+    char* payload;
+    struct block* prev;
+    struct block* next;
+} block;
+
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 
+/* Cache root */
+static block* cache_root;
 
+/* Current cache size, only counts payloads(cached web objects) */
+static size_t cache_size;
+
+sem_t mutex;
+
+/*Prototypes of functions */
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *buf);
 void parse_url(char *url, char *host, char *port, char *uri);
 void clienterror(int fd, char *cause, char *shortmsg, char *longmsg);
 void *thread(void *vargp);
+void cache_init(void);
+void add_to_cache(char *url, char* payload, size_t payload_size);
+block* get_from_cache(char *url);
 
 int main(int argc, char **argv)
 {
@@ -30,6 +50,10 @@ int main(int argc, char **argv)
     }
 
     listenfd = Open_listenfd(argv[1]);
+
+    cache_init();               //init cache 
+    Sem_init(&mutex, 0, 1);     //init mutex = 1
+
     while (1) {
         clientlen = sizeof(clientaddr);
         connfdp = Malloc(sizeof(int));
@@ -66,6 +90,10 @@ void doit(int fd)
     char buf[MAXLINE], method[MAXLINE], url[MAXLINE], version[MAXLINE];
     char uri[MAXLINE], host[MAXLINE], port[MAXLINE];
     rio_t rio, rio_s;
+    block* cachedp;
+    size_t object_zize;
+    ssize_t added;
+    char *OBJECT_BUFF;
 
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
@@ -76,13 +104,8 @@ void doit(int fd)
     sscanf(buf, "%s %s %s", method, url, version);      //line:netp:doit:parserequest
   
     strcpy(version, "HTTP/1.0");
-    parse_url(url, host, port, uri);
 
-    if ((clientfd = open_clientfd(host, port)) < 0) {
-        clienterror(fd, url, "Not found",
-		    "Proxy couldn't connect this web");
-        return;
-    }
+    parse_url(url, host, port, uri);
 
     sprintf(buf, "%s %s %s\r\n", method, uri, version);
     sprintf(buf, "%s%s", buf, user_agent_hdr);
@@ -92,17 +115,49 @@ void doit(int fd)
 
     read_requesthdrs(&rio, buf);                   //line:netp:doit:readrequesthdrs
 
+    /* Get web object from cache */
+    P(&mutex);
+    if ((cachedp = get_from_cache(url)) != NULL) {
+        Rio_writen(fd, cachedp->payload, cachedp->payload_size);
+        V(&mutex);
+        return;
+    }
+    V(&mutex);
+
+    /* Get web object from server */
+    if ((clientfd = open_clientfd(host, port)) < 0) {
+        clienterror(fd, url, "Not found",
+		    "Proxy couldn't connect this web");
+        return;
+    }
+
     /* Send request line and headers to server */
     Rio_writen(clientfd, buf, strlen(buf));        
 
     /* Read servers’ response, and forward to client */
     Rio_readinitb(&rio_s, clientfd);
-    while(Rio_readnb(&rio_s, buf, MAXLINE)) {
-        Rio_writen(fd, buf, MAXLINE);
+    OBJECT_BUFF = Malloc(MAX_OBJECT_SIZE);
+    object_zize = 0;
+    while((added = Rio_readnb(&rio_s, buf, MAXLINE)) > 0) {
+        if (object_zize <= MAX_OBJECT_SIZE) {
+            memcpy(OBJECT_BUFF + object_zize, buf, added);
+            object_zize += added;
+        }
+        Rio_writen(fd, buf, added);
+    }
+
+    /* If the size of web object less or equal to MAX_OBJECT_SIZE, add it to cache */
+    if (object_zize > MAX_OBJECT_SIZE) {
+        Free(OBJECT_BUFF);
+    } else {
+        P(&mutex);
+        add_to_cache(url, OBJECT_BUFF, object_zize);
+        V(&mutex);
     }
 
     Close(clientfd);
 }
+
 
 /*
  * parse_url - parse URL into host, port and uri
@@ -112,9 +167,9 @@ void parse_url(char *url, char *host, char *port, char *uri)
 {
     char *ptr;                         
 
-    ptr = strstr(url, "http://"); 
+    ptr = strstr(url, "//"); 
     if (ptr) {
-        strcpy(host, ptr + 7); 
+        strcpy(host, ptr + 2); 
     } else {
         strcpy(host, url);
     }
@@ -179,3 +234,81 @@ void clienterror(int fd, char *cause, char *shortmsg, char *longmsg)
     Rio_writen(fd, buf, strlen(buf));
 }
 /* $end clienterror */
+
+
+/**********************************
+ * Cache package
+ **********************************/
+
+/* cache_init */
+void cache_init(void)
+{
+    cache_root = NULL;
+    cache_size = 0;
+}
+
+/* Add payload of payload_size to cache */
+void add_to_cache(char *url, char* payload, size_t payload_size)
+{
+    block* new_blockp;
+    block* p;
+    block* last_blockp;
+    block* block_tofreep = NULL;
+    block* nextp;
+    size_t sum;
+    size_t bytes_tofree;
+    
+    new_blockp = Malloc(sizeof(block));
+    strcpy(new_blockp->url, url);
+    new_blockp->payload = payload;
+    new_blockp->payload_size = payload_size;
+    
+    if (cache_size + payload_size <= MAX_CACHE_SIZE) {
+        cache_size += payload_size;
+    } else {
+        /* evict */
+        for (p = cache_root; p != NULL; p = p->next) {
+            last_blockp = p;
+        }
+
+        sum = 0;
+        bytes_tofree = cache_size + payload_size - MAX_CACHE_SIZE;
+        for (p = last_blockp; p != NULL; p = p->prev) {
+            sum += p->payload_size;
+            if (sum >= bytes_tofree) {
+                block_tofreep = p;
+                break;
+            }
+        }
+        // free memory
+        for (p = block_tofreep; p != NULL; p = nextp) {
+            Free(p->payload);
+            nextp = p->next;
+            Free(p);
+        }
+        cache_size = cache_size - sum + payload_size;
+        block_tofreep->prev->next = NULL;
+    }
+    new_blockp->next = cache_root;
+    new_blockp->prev = NULL;
+    cache_root = new_blockp;
+}
+
+/* Get block ptr with url, if no block matches, return NULL */
+block* get_from_cache(char *url)
+{
+    block* p;
+    for (p = cache_root; p != NULL; p = p->next) {
+        if (!strcmp(url, p->url)) {
+            if (p->prev) {
+                (p->prev)->next = p->next;
+                p->next->prev = p->prev;
+                p->next = cache_root;
+                p->prev = NULL;
+                cache_root = p;
+            }
+            return p;
+        }
+    }
+    return NULL;
+}
